@@ -88,7 +88,6 @@ class MIDIAudioRenderer {
         sampleRate: Double,
         instrument: String
     ) {
-        // Simple synthesis for now (will be replaced with Audio Units)
         let startFrame = Int(note.startTime * sampleRate)
         let durationFrames = Int(note.duration * sampleRate)
         let endFrame = min(startFrame + durationFrames, Int(buffer.frameLength))
@@ -97,7 +96,10 @@ class MIDIAudioRenderer {
         
         // Generate a simple tone based on MIDI note
         let frequency = midiNoteToFrequency(note.pitch)
-        let amplitude = Float(note.velocity) / 127.0 * 0.3
+        
+        // BOOST AMPLITUDE - Changed from 0.3 to 2.0 for drums/bass
+        let baseAmplitude = Float(note.velocity) / 127.0
+        let amplitude = instrument == "Drums" ? baseAmplitude * 3.0 : baseAmplitude * 2.5
         
         // Apply envelope (ADSR)
         let attackFrames = Int(0.01 * sampleRate)  // 10ms attack
