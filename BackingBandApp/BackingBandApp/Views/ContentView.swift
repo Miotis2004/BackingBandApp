@@ -132,6 +132,13 @@ struct MainContentView: View {
             }
             .frame(maxHeight: .infinity)
             
+            // Notes display (when available)
+            if let guitarTrack = viewModel.guitarTrack {
+                Divider()
+                NotesDisplayView(track: guitarTrack)
+                    .padding()
+            }
+            
             // Analysis display (when available)
             if let analysis = viewModel.analysis {
                 Divider()

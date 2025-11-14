@@ -43,58 +43,98 @@ class AudioProcessingViewModel: ObservableObject {
         errorMessage = nil
         progress = 0
         
-        do {
-            // Step 1: Transcribe audio to MIDI
-            statusMessage = "Transcribing guitar..."
-            progress = 0.1
-            guitarTrack = try await transcriptionService.transcribe(inputURL)
+        // Run the heavy work on a background thread
+        Task.detached { [weak self] in
+            guard let self else { return }
             
-            // Step 2: Analyze music structure
-            guard let guitarTrack = guitarTrack else {
-                throw ProcessingError.transcriptionFailed
+            do {
+                // Step 1: Transcribe audio to MIDI (OFF MAIN THREAD)
+                await MainActor.run {
+                    self.statusMessage = "Transcribing guitar..."
+                    self.progress = 0.1
+                }
+                
+                let guitarTrack = try await self.transcriptionService.transcribe(inputURL) { transcriptionProgress, message in
+                    Task { @MainActor in
+                        self.progress = 0.1 + (transcriptionProgress * 0.2)
+                        self.statusMessage = message
+                    }
+                }
+                
+                // Update UI on main thread
+                await MainActor.run {
+                    self.guitarTrack = guitarTrack
+                    self.statusMessage = "Transcription complete! Found \(guitarTrack.notes.count) notes"
+                    self.progress = 1.0
+                }
+                
+                // Step 2: Analyze music structure
+                await MainActor.run {
+                    self.statusMessage = "Analyzing music structure..."
+                    self.progress = 0.3
+                }
+                
+                let analysis = try await self.analysisService.analyze(guitarTrack)
+                
+                await MainActor.run {
+                    self.analysis = analysis
+                    self.progress = 0.5
+                }
+                
+                // Step 3: Generate drums
+                await MainActor.run {
+                    self.statusMessage = "Generating drums..."
+                }
+                
+                let drumsTrack = try await self.drumGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
+                
+                await MainActor.run {
+                    self.drumsTrack = drumsTrack
+                    self.progress = 0.7
+                }
+                
+                // Step 4: Generate bass
+                await MainActor.run {
+                    self.statusMessage = "Generating bass..."
+                }
+                
+                let bassTrack = try await self.bassGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
+                
+                await MainActor.run {
+                    self.bassTrack = bassTrack
+                    self.progress = 0.9
+                    self.statusMessage = "Rendering audio..."
+                }
+                
+                // Step 5: Render to audio
+                let outputURL = await MainActor.run {
+                    self.createOutputURL()
+                }
+                
+                var tracks: [MIDITrack] = []
+                tracks.append(drumsTrack)
+                tracks.append(bassTrack)
+                
+                try await self.audioRenderer.render(tracks: tracks, outputURL: outputURL)
+                
+                await MainActor.run {
+                    self.outputFileURL = outputURL
+                    self.progress = 1.0
+                    self.statusMessage = "Complete! 🎵"
+                }
+                
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.statusMessage = "Error occurred"
+                }
+                print("Processing error: \(error)")
             }
-            statusMessage = "Analyzing music structure..."
-            progress = 0.3
-            analysis = try await analysisService.analyze(guitarTrack)
             
-            // Step 3: Generate drums
-            guard let analysis = analysis else {
-                throw ProcessingError.analysisFailed
+            await MainActor.run {
+                self.isProcessing = false
             }
-            statusMessage = "Generating drums..."
-            progress = 0.5
-            drumsTrack = try await drumGenerator.generate(analysis: analysis, genre: selectedGenre)
-            
-            // Step 4: Generate bass
-            statusMessage = "Generating bass..."
-            progress = 0.7
-            bassTrack = try await bassGenerator.generate(analysis: analysis, genre: selectedGenre)
-            
-            // Step 5: Render to audio
-            statusMessage = "Rendering audio..."
-            progress = 0.9
-            
-            // Create output URL
-            let outputURL = createOutputURL()
-            outputFileURL = outputURL
-            
-            // Render all tracks
-            var tracks: [MIDITrack] = []
-            if let drums = drumsTrack { tracks.append(drums) }
-            if let bass = bassTrack { tracks.append(bass) }
-            
-            try await audioRenderer.render(tracks: tracks, outputURL: outputURL)
-            
-            progress = 1.0
-            statusMessage = "Complete! 🎵"
-            
-        } catch {
-            errorMessage = error.localizedDescription
-            statusMessage = "Error occurred"
-            print("Processing error: \(error)")
         }
-        
-        isProcessing = false
     }
     
     // MARK: - File Selection
