@@ -20,6 +20,9 @@ class AudioProcessingViewModel: ObservableObject {
     @Published var drumsTrack: MIDITrack?
     @Published var bassTrack: MIDITrack?
     
+    @Published var stemCollection: StemCollection?
+    let stemPlayer = StemPlayerService()
+    
     // MARK: - Services
     let audioPlayer = AudioPlayerService()
     private let transcriptionService = TranscriptionService()
@@ -34,108 +37,111 @@ class AudioProcessingViewModel: ObservableObject {
     
     // MARK: - Main Processing Pipeline
     func processAudioFile() async {
-        guard let inputURL = inputFileURL else {
-            errorMessage = "No input file selected"
-            return
-        }
-        
-        isProcessing = true
-        errorMessage = nil
-        progress = 0
-        
-        // Run the heavy work on a background thread
-        Task.detached { [weak self] in
-            guard let self else { return }
+            guard let inputURL = inputFileURL else {
+                errorMessage = "No input file selected"
+                return
+            }
             
-            do {
-                // Step 1: Transcribe audio to MIDI (OFF MAIN THREAD)
-                await MainActor.run {
-                    self.statusMessage = "Transcribing guitar..."
-                    self.progress = 0.1
-                }
+            isProcessing = true
+            errorMessage = nil
+            progress = 0
+            
+            Task.detached { [weak self] in
+                guard let self else { return }
                 
-                let guitarTrack = try await self.transcriptionService.transcribe(inputURL) { transcriptionProgress, message in
-                    Task { @MainActor in
-                        self.progress = 0.1 + (transcriptionProgress * 0.2)
-                        self.statusMessage = message
+                do {
+                    // Step 1: Transcribe
+                    await MainActor.run {
+                        self.statusMessage = "Transcribing guitar..."
+                        self.progress = 0.1
                     }
+                    
+                    let guitarTrack = try await self.transcriptionService.transcribe(inputURL) { transcriptionProgress, message in
+                        Task { @MainActor in
+                            self.progress = 0.1 + (transcriptionProgress * 0.15)
+                            self.statusMessage = message
+                        }
+                    }
+                    
+                    await MainActor.run {
+                        self.guitarTrack = guitarTrack
+                    }
+                    
+                    // Step 2: Analyze
+                    await MainActor.run {
+                        self.statusMessage = "Analyzing music structure..."
+                        self.progress = 0.25
+                    }
+                    
+                    let analysis = try await self.analysisService.analyze(guitarTrack)
+                    
+                    await MainActor.run {
+                        self.analysis = analysis
+                        self.progress = 0.35
+                    }
+                    
+                    // Step 3: Generate drums
+                    await MainActor.run {
+                        self.statusMessage = "Generating drums..."
+                        self.progress = 0.4
+                    }
+                    
+                    let drumsTrack = try await self.drumGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
+                    
+                    await MainActor.run {
+                        self.drumsTrack = drumsTrack
+                        self.progress = 0.5
+                    }
+                    
+                    // Step 4: Generate bass
+                    await MainActor.run {
+                        self.statusMessage = "Generating bass..."
+                        self.progress = 0.55
+                    }
+                    
+                    let bassTrack = try await self.bassGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
+                    
+                    await MainActor.run {
+                        self.bassTrack = bassTrack
+                        self.progress = 0.6
+                    }
+                    
+                    // Step 5: Render to audio stems
+                    await MainActor.run {
+                        self.statusMessage = "Rendering audio..."
+                    }
+                    
+                    let stems = try await self.audioRenderer.render(
+                            originalAudioURL: inputURL,
+                            drumsTrack: drumsTrack,
+                            bassTrack: bassTrack
+                        ) { renderProgress, message in
+                            Task { @MainActor in
+                                self.progress = 0.6 + (renderProgress * 0.4)
+                                self.statusMessage = message
+                            }
+                        }
+                        
+                        await MainActor.run {
+                            self.stemCollection = stems
+                            self.stemPlayer.loadStems(stems)  // ADD THIS LINE
+                            self.progress = 1.0
+                            self.statusMessage = "Complete! 🎵 Ready to preview and export"
+                        }
+                    
+                } catch {
+                    await MainActor.run {
+                        self.errorMessage = error.localizedDescription
+                        self.statusMessage = "Error occurred"
+                    }
+                    print("Processing error: \(error)")
                 }
                 
-                // Update UI on main thread
                 await MainActor.run {
-                    self.guitarTrack = guitarTrack
-                    self.statusMessage = "Transcription complete! Found \(guitarTrack.notes.count) notes"
-                    self.progress = 1.0
+                    self.isProcessing = false
                 }
-                
-                // Step 2: Analyze music structure
-                await MainActor.run {
-                    self.statusMessage = "Analyzing music structure..."
-                    self.progress = 0.3
-                }
-                
-                let analysis = try await self.analysisService.analyze(guitarTrack)
-                
-                await MainActor.run {
-                    self.analysis = analysis
-                    self.progress = 0.5
-                }
-                
-                // Step 3: Generate drums
-                await MainActor.run {
-                    self.statusMessage = "Generating drums..."
-                }
-                
-                let drumsTrack = try await self.drumGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
-                
-                await MainActor.run {
-                    self.drumsTrack = drumsTrack
-                    self.progress = 0.7
-                }
-                
-                // Step 4: Generate bass
-                await MainActor.run {
-                    self.statusMessage = "Generating bass..."
-                }
-                
-                let bassTrack = try await self.bassGenerator.generate(analysis: analysis, genre: await self.selectedGenre)
-                
-                await MainActor.run {
-                    self.bassTrack = bassTrack
-                    self.progress = 0.9
-                    self.statusMessage = "Rendering audio..."
-                }
-                
-                // Step 5: Render to audio
-                let outputURL = await MainActor.run {
-                    self.createOutputURL()
-                }
-                
-                var tracks: [MIDITrack] = []
-                tracks.append(drumsTrack)
-                tracks.append(bassTrack)
-                
-                try await self.audioRenderer.render(tracks: tracks, outputURL: outputURL)
-                
-                await MainActor.run {
-                    self.outputFileURL = outputURL
-                    self.progress = 1.0
-                    self.statusMessage = "Complete! 🎵"
-                }
-                
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                    self.statusMessage = "Error occurred"
-                }
-                print("Processing error: \(error)")
-            }
-            
-            await MainActor.run {
-                self.isProcessing = false
             }
         }
-    }
     
     // MARK: - File Selection
     func selectInputFile() {
@@ -166,6 +172,44 @@ class AudioProcessingViewModel: ObservableObject {
             outputFileURL = nil
         }
     }
+    
+    // MARK: - Export Functions
+        func exportMixedAudio() async {
+            guard let stems = stemCollection else { return }
+            
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.wav]
+            panel.nameFieldStringValue = "mixed_backing_track.wav"
+            panel.message = "Export mixed audio"
+            
+            guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+            
+            do {
+                try await audioRenderer.mixAndExport(stems: stems, outputURL: outputURL)
+                outputFileURL = outputURL
+                statusMessage = "Exported to: \(outputURL.lastPathComponent)"
+            } catch {
+                errorMessage = "Export failed: \(error.localizedDescription)"
+            }
+        }
+        
+        func exportSeparateStems() async {
+            guard let stems = stemCollection else { return }
+            
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.message = "Choose export folder for stems"
+            
+            guard panel.runModal() == .OK, let directory = panel.url else { return }
+            
+            do {
+                let urls = try await audioRenderer.exportStems(stems: stems, outputDirectory: directory)
+                statusMessage = "Exported \(urls.count) stems to: \(directory.lastPathComponent)"
+            } catch {
+                errorMessage = "Export failed: \(error.localizedDescription)"
+            }
+        }
     
     func selectOutputLocation() {
         let panel = NSSavePanel()

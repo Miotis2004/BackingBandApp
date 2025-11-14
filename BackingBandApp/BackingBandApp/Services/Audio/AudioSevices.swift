@@ -338,8 +338,182 @@ class BassGenerator {
 }
 
 class AudioRenderer {
-    func render(tracks: [MIDITrack], outputURL: URL) async throws {
-        // TODO: Implement rendering
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+    private let midiRenderer = MIDIAudioRenderer()
+    
+    func render(
+        originalAudioURL: URL,
+        drumsTrack: MIDITrack,
+        bassTrack: MIDITrack,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws -> StemCollection {
+        
+        print("Starting audio rendering...")
+        
+        let stemCollection = StemCollection()
+        
+        // Load original guitar audio
+        await MainActor.run {
+            progressHandler?(0.1, "Loading guitar audio...")
+        }
+        
+        let guitarBuffer = try loadAudioFile(url: originalAudioURL)
+        let guitarStem = AudioStem(name: "Guitar", buffer: guitarBuffer, sourceURL: originalAudioURL)
+        guitarStem.level = 1.0
+        
+        await MainActor.run {
+            stemCollection.addStem(guitarStem)
+        }
+        
+        // Render drums MIDI to audio
+        await MainActor.run {
+            progressHandler?(0.3, "Rendering drums...")
+        }
+        
+        let drumsBuffer = try await midiRenderer.renderToAudio(midiTrack: drumsTrack) { progress in
+            Task { @MainActor in
+                progressHandler?(0.3 + (progress * 0.3), "Rendering drums... \(Int(progress * 100))%")
+            }
+        }
+        
+        let drumsStem = AudioStem(name: "Drums", buffer: drumsBuffer)
+        drumsStem.level = 0.8
+        
+        await MainActor.run {
+            stemCollection.addStem(drumsStem)
+        }
+        
+        // Render bass MIDI to audio
+        await MainActor.run {
+            progressHandler?(0.6, "Rendering bass...")
+        }
+        
+        let bassBuffer = try await midiRenderer.renderToAudio(midiTrack: bassTrack) { progress in
+            Task { @MainActor in
+                progressHandler?(0.6 + (progress * 0.3), "Rendering bass... \(Int(progress * 100))%")
+            }
+        }
+        
+        let bassStem = AudioStem(name: "Bass", buffer: bassBuffer)
+        bassStem.level = 0.9
+        
+        await MainActor.run {
+            stemCollection.addStem(bassStem)
+            progressHandler?(1.0, "Rendering complete!")
+        }
+        
+        print("✅ All stems rendered successfully")
+        
+        return stemCollection
     }
+    
+    // MARK: - Mix Stems to Single File
+    func mixAndExport(
+        stems: StemCollection,
+        outputURL: URL
+    ) async throws {
+        print("Mixing and exporting...")
+        
+        // Find longest buffer
+        guard let longestBuffer = stems.stems.map({ $0.buffer }).max(by: { $0.frameLength < $1.frameLength }) else {
+            throw RenderError.bufferCreationFailed
+        }
+        
+        let format = longestBuffer.format
+        print("Mix format: \(format.sampleRate)Hz, \(format.channelCount) channels")
+        print("Mix length: \(longestBuffer.frameLength) frames")
+        
+        guard let mixedBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: longestBuffer.frameLength) else {
+            throw RenderError.bufferCreationFailed
+        }
+        mixedBuffer.frameLength = longestBuffer.frameLength
+        
+        // Zero out mixed buffer
+        if let channelData = mixedBuffer.floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                memset(channelData[channel], 0, Int(mixedBuffer.frameLength) * MemoryLayout<Float>.size)
+            }
+        }
+        
+        // Mix all stems
+        guard let mixedChannelData = mixedBuffer.floatChannelData else {
+            throw RenderError.bufferCreationFailed
+        }
+        
+        for stem in stems.stems {
+            let effectiveLevel = stems.effectiveLevel(for: stem) * stems.masterLevel
+            
+            print("Mixing \(stem.name): level=\(effectiveLevel), frames=\(stem.buffer.frameLength)")
+            
+            guard let stemChannelData = stem.buffer.floatChannelData else {
+                print("No channel data for \(stem.name)")
+                continue
+            }
+            
+            let framesToMix = min(Int(stem.buffer.frameLength), Int(mixedBuffer.frameLength))
+            
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<framesToMix {
+                    mixedChannelData[channel][frame] += stemChannelData[channel][frame] * effectiveLevel
+                }
+            }
+            
+            print("Mixed \(stem.name)")
+        }
+        
+        // Export to file
+        try exportBuffer(mixedBuffer, to: outputURL)
+        
+        print("Mixed audio exported to: \(outputURL.lastPathComponent)")
+    }
+    
+    // MARK: - Export Individual Stems
+    func exportStems(
+        stems: StemCollection,
+        outputDirectory: URL
+    ) async throws -> [URL] {
+        print("💾 Exporting individual stems...")
+        
+        var exportedURLs: [URL] = []
+        
+        for stem in stems.stems {
+            let filename = "\(stem.name.lowercased())_stem.wav"
+            let outputURL = outputDirectory.appendingPathComponent(filename)
+            
+            try exportBuffer(stem.buffer, to: outputURL)
+            exportedURLs.append(outputURL)
+            
+            print("✅ Exported: \(filename)")
+        }
+        
+        return exportedURLs
+    }
+    
+    // MARK: - Helper Methods
+    private func loadAudioFile(url: URL) throws -> AVAudioPCMBuffer {
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw RenderError.bufferCreationFailed
+        }
+        
+        try file.read(into: buffer)
+        return buffer
+    }
+    
+    private func exportBuffer(_ buffer: AVAudioPCMBuffer, to url: URL) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: buffer.format.sampleRate,
+            AVNumberOfChannelsKey: buffer.format.channelCount,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        
+        let audioFile = try AVAudioFile(forWriting: url, settings: settings)
+        try audioFile.write(from: buffer)
+    }
+    
 }

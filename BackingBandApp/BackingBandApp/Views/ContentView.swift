@@ -139,6 +139,25 @@ struct MainContentView: View {
                     .padding()
             }
             
+            // Stem Mixer (when stems are available)
+            if let stems = viewModel.stemCollection {
+                StemMixerView(
+                    stemCollection: stems,
+                    stemPlayer: viewModel.stemPlayer,  // Pass the player
+                    onExportMixed: {
+                        Task {
+                            await viewModel.exportMixedAudio()
+                        }
+                    },
+                    onExportStems: {
+                        Task {
+                            await viewModel.exportSeparateStems()
+                        }
+                    }
+                )
+                .padding(.horizontal)
+            }
+            
             // Analysis display (when available)
             if let analysis = viewModel.analysis {
                 Divider()
