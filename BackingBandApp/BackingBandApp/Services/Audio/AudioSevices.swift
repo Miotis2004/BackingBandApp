@@ -191,10 +191,149 @@ class DrumGenerator {
 }
 
 class BassGenerator {
+    
+    // MARK: - Note name to MIDI number mapping
+    private let noteToMIDI: [String: Int] = [
+        "C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+        "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11
+    ]
+    
     func generate(analysis: MusicAnalysis, genre: Genre) async throws -> MIDITrack {
-        // TODO: Implement bass generation
-        try await Task.sleep(nanoseconds: 500_000_000)
-        return MIDITrack(name: "Bass", notes: [], instrument: "Bass")
+        print("🎸 Generating bass for \(genre.displayName)...")
+        
+        return await Task.detached(priority: .userInitiated) {
+            var bassNotes: [MIDINote] = []
+            
+            // Get patterns for this genre
+            let patterns = BassPatternLibrary.patterns(for: genre)
+            
+            guard !patterns.isEmpty else {
+                print("❌ No bass patterns available for genre")
+                return MIDITrack(name: "Bass", notes: [], instrument: "Bass")
+            }
+            
+            // Calculate beats per second
+            let beatsPerSecond = analysis.tempo / 60.0
+            let secondsPerBeat = 1.0 / beatsPerSecond
+            
+            // Select primary pattern (can vary later)
+            let primaryPattern = patterns[0]
+            let alternatePattern = patterns.count > 1 ? patterns[1] : primaryPattern
+            
+            // Generate bass for each chord
+            for (index, chord) in analysis.chords.enumerated() {
+                print("🎵 Bass for chord: \(chord.displayName)")
+                
+                // Get root note MIDI number
+                guard let rootMIDI = self.getRootMIDI(for: chord) else {
+                    print("⚠️ Could not determine root for \(chord.root)")
+                    continue
+                }
+                
+                // Select pattern (vary for interest)
+                let useAlternate = (index % 4 == 2 || index % 4 == 3) && patterns.count > 1
+                let pattern = useAlternate ? alternatePattern : primaryPattern
+                
+                // Calculate how many times to repeat the pattern for this chord duration
+                let patternDuration = Double(pattern.beatsPerBar) * secondsPerBeat
+                let repetitions = Int(ceil(chord.duration / patternDuration))
+                
+                // Generate notes for each repetition
+                for rep in 0..<repetitions {
+                    let patternStartTime = chord.startTime + (Double(rep) * patternDuration)
+                    
+                    // Stop if we've gone past the chord duration
+                    guard patternStartTime < chord.startTime + chord.duration else { break }
+                    
+                    let notes = self.convertPatternToNotes(
+                        pattern: pattern,
+                        rootMIDI: rootMIDI,
+                        startTime: patternStartTime,
+                        tempo: analysis.tempo,
+                        chordDuration: chord.duration - (Double(rep) * patternDuration)
+                    )
+                    
+                    bassNotes.append(contentsOf: notes)
+                }
+            }
+            
+            print("✅ Generated \(bassNotes.count) bass notes")
+            
+            return MIDITrack(
+                name: "Bass",
+                notes: bassNotes,
+                instrument: "Bass"
+            )
+        }.value
+    }
+    
+    // MARK: - Get Root MIDI Note
+    private func getRootMIDI(for chord: Chord) -> Int? {
+        // Remove any modifiers (like "maj", "m") to get just the note name
+        let noteName = chord.root.replacingOccurrences(of: "♯", with: "#")
+                                  .replacingOccurrences(of: "♭", with: "b")
+        
+        // Handle flats (convert to sharp equivalents)
+        let normalizedNote: String
+        if noteName.contains("b") {
+            let flatMap: [String: String] = [
+                "Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"
+            ]
+            normalizedNote = flatMap[noteName] ?? noteName.replacingOccurrences(of: "b", with: "")
+        } else {
+            normalizedNote = noteName
+        }
+        
+        guard let pitchClass = noteToMIDI[normalizedNote] else {
+            return nil
+        }
+        
+        // Bass typically plays in octaves 1-3 (MIDI 36-60)
+        // Use octave 2 (MIDI 36-47) as default
+        let bassMIDI = 36 + pitchClass  // E1 = 28, so 36 = C2
+        
+        return bassMIDI
+    }
+    
+    // MARK: - Convert Pattern to Notes
+    private func convertPatternToNotes(
+        pattern: BassPattern,
+        rootMIDI: Int,
+        startTime: TimeInterval,
+        tempo: Double,
+        chordDuration: TimeInterval
+    ) -> [MIDINote] {
+        
+        let secondsPerBeat = 60.0 / tempo
+        var notes: [MIDINote] = []
+        
+        for bassNote in pattern.notes {
+            let noteStartTime = startTime + (bassNote.position * secondsPerBeat)
+            
+            // Don't add notes that would go past the chord change
+            guard noteStartTime < startTime + chordDuration else { continue }
+            
+            // Calculate MIDI note with offset
+            let octaveShift = bassNote.octaveOffset * 12
+            let midiNote = rootMIDI + bassNote.rootOffset + octaveShift
+            
+            // Clamp to valid MIDI range (keep in bass range)
+            let clampedMIDI = max(28, min(60, midiNote))
+            
+            let noteDuration = min(bassNote.duration * secondsPerBeat, chordDuration - (bassNote.position * secondsPerBeat))
+            
+            let note = MIDINote(
+                pitch: UInt8(clampedMIDI),
+                velocity: bassNote.velocity,
+                startTime: noteStartTime,
+                duration: noteDuration,
+                channel: 0  // Bass on channel 1
+            )
+            
+            notes.append(note)
+        }
+        
+        return notes
     }
 }
 
